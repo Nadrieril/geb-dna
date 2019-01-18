@@ -1,5 +1,5 @@
 {-# LANGUAGE LambdaCase, OverloadedStrings, TypeSynonymInstances, FlexibleInstances,
-    FlexibleContexts, ConstraintKinds #-}
+    FlexibleContexts, ConstraintKinds, MultiParamTypeClasses, DeriveGeneric, RankNTypes #-}
 module DNA where
 
 import Data.String (IsString(..))
@@ -7,22 +7,50 @@ import Control.Arrow (first, second)
 import Control.Lens
 import Control.Monad.State
 import Control.Monad.Except
-import Control.Monad.RWS
+import Control.Monad.RWS.Strict
+import Test.SmallCheck.Series
+import GHC.Generics (Generic)
 
 import qualified Zipper as Z
 
+
+either1ToMaybe :: Either () a -> Maybe a
+either1ToMaybe = either (const Nothing) Just
+
+maybeToEither1 :: Maybe a -> Either () a
+maybeToEither1 = maybe (Left ()) Right
+
+liftMaybe :: MonadError () m => Maybe a -> m a
+liftMaybe = liftEither . maybeToEither1
+
+(%?=) :: (MonadState s m, MonadError () m) => Lens s s a b -> (a -> Maybe b) -> m ()
+(%?=) l f = do
+    x <- use $ getting l
+    x' <- liftMaybe $ f x
+    l .= x'
+
+-- separate even-numbered elements from odd-numbered elements
+unbraid :: [a] -> ([a], [a])
+unbraid = \case
+    [] -> ([], [])
+    (a:b:q) -> first (a:) $ second (b:) $ unbraid q
+    (_:q) -> unbraid q
+
+collectStreaks :: [Maybe a] -> [[a]]
+collectStreaks = filter (not . null) . aux
+    where aux = \case
+            Nothing:q -> [] : aux q
+            (Just x):q -> over _head (x:) $ aux q
+            [] -> [[]]
+
+-- smallcheck
+instance Monad m => Serial m Base where
+instance Monad m => Serial m Structure where
+
+
+
 data Base = A | C | G | T
-    deriving (Show, Read, Eq)
-
-data BaseType = Py | Pu
-    deriving (Show, Eq)
-
-baseType :: Base -> BaseType
-baseType = \case
-    A -> Pu
-    G -> Pu
-    C -> Py
-    T -> Py
+    deriving (Show, Read, Eq, Generic)
 
 baseComplement :: Base -> Base
 baseComplement = \case
@@ -32,6 +60,23 @@ baseComplement = \case
     T -> A
 
 
+type Strand = [Base]
+
+instance {-# OVERLAPPING  #-} IsString Strand where
+    fromString = map (read . (:[]))
+
+
+data Structure = Py | Pu
+    deriving (Show, Eq, Generic)
+
+structure :: Base -> Structure
+structure = \case
+    A -> Pu
+    G -> Pu
+    C -> Py
+    T -> Py
+
+
 data Direction = L | R
     deriving (Show, Eq)
 
@@ -39,7 +84,7 @@ data AminoAcid =
       Cut | Del | Switch
     | Move Direction | Copy Bool
     | Ins Base
-    | Search Direction BaseType
+    | Search Direction Structure
     deriving (Show, Eq)
 
 dupletToAA :: (Base, Base) -> Maybe AminoAcid
@@ -52,10 +97,7 @@ dupletToAA = \case
     (C, C) -> Just $ Move L
     (C, G) -> Just $ Copy True
     (C, T) -> Just $ Copy False
-    (G, A) -> Just $ Ins A
-    (G, C) -> Just $ Ins C
-    (G, G) -> Just $ Ins G
-    (G, T) -> Just $ Ins T
+    (G, b) -> Just $ Ins b
     (T, A) -> Just $ Search R Py
     (T, C) -> Just $ Search R Pu
     (T, G) -> Just $ Search L Py
@@ -80,115 +122,136 @@ aaBend = \case
     Search _ _ -> -1
 
 
-type Strand = [Base]
 type Enzyme = [AminoAcid]
-
-instance {-# OVERLAPPING  #-} IsString Strand where
-    fromString = map (read . (:[]))
 
 enzymeAffinity :: Enzyme -> Base
 enzymeAffinity e = let
     totalBend = sum $ init $ tail $ map aaBend e
     in [A, G, T, C] !! (totalBend `mod` 4)
 
-split :: [a] -> ([a], [a])
-split = \case
-    [] -> ([], [])
-    (a:b:q) -> first (a:) $ second (b:) $ split q
-    (_:q) -> split q
-
-firstL :: (a -> a) -> [a] -> [a]
-firstL f = \case
-    [] -> []
-    x:q -> (f x):q
-
-collect_streaks :: [Maybe a] -> [[a]]
-collect_streaks = \case
-    Nothing:q -> [] : collect_streaks q
-    (Just x):q -> firstL (x:) $ collect_streaks q
-    [] -> [[]]
-
-ribosome :: Strand -> [Enzyme]
-ribosome strand = filter (not . null) $ collect_streaks $ map dupletToAA duplets
+synthesize :: Strand -> [Enzyme]
+synthesize strand = collectStreaks $ map dupletToAA duplets
     where
-        half_strands = split strand
+        half_strands = unbraid strand
         duplets = zip (fst half_strands) (snd half_strands)
 
 
+data Position = This | Other | Both
+    deriving (Show, Eq)
 
-data BasePos = BPTop | BPBot | BPBoth
+flipPosition :: Position -> Position
+flipPosition = \case
+    Other -> This
+    This -> Other
+    Both -> Both
 
-flipBasePos :: BasePos -> BasePos
-flipBasePos = \case
-    BPTop -> BPBot
-    BPBot -> BPTop
-    BPBoth -> BPBoth
 
-data DoubledBase = DoubledBase Base BasePos
+data DoubledBase = DoubledBase Base Position
+    deriving (Show, Eq)
+
+base :: Lens' DoubledBase Base
+base f (DoubledBase b p) = (flip DoubledBase p) <$> f b
+
+pos :: Lens' DoubledBase Position
+pos f (DoubledBase b p) = (DoubledBase b) <$> f p
+
+doubleBase :: Base -> DoubledBase
+doubleBase = flip DoubledBase This
 
 flipDoubledBase :: DoubledBase -> DoubledBase
-flipDoubledBase (DoubledBase b p) = DoubledBase (baseComplement b) (flipBasePos p)
+flipDoubledBase (DoubledBase b p) = DoubledBase (baseComplement b) (flipPosition p)
 
-baseDB :: Lens' DoubledBase Base
-baseDB f (DoubledBase b p) = (flip DoubledBase p) <$> f b
+extractDoubledBase :: DoubledBase -> (Maybe Base, Maybe Base)
+extractDoubledBase (DoubledBase b p) =
+    case p of
+      This -> (Just b, Nothing)
+      Other -> (Nothing, Just $ baseComplement b)
+      Both -> (Just b, Just $ baseComplement b)
 
-posDB :: Lens' DoubledBase BasePos
-posDB f (DoubledBase b p) = (DoubledBase b) <$> f p
+
+-- doubled strand + cursor into it
+type StrandState = Z.Zipper DoubledBase
+
+collectStrands :: StrandState -> [Strand]
+collectStrands l = collectStreaks this ++ collectStreaks (reverse other)
+    where (this, other) = unzip $ fmap extractDoubledBase $ Z.toList l
+
+rotateStrandState :: StrandState -> StrandState
+rotateStrandState = Z.reverse . fmap flipDoubledBase
+
+initStrandState :: Strand -> Int -> StrandState
+initStrandState s i = Z.fromList i $ fmap doubleBase s
 
 
-type StrandState = (Bool, Z.Zipper DoubledBase)
+-- (copy mode, strand state)
+type EnzymeState = (Bool, StrandState)
 
-copy :: Lens' StrandState Bool
+initEnzymeState :: Strand -> Int -> EnzymeState
+initEnzymeState s i = (False, initStrandState s i)
+
+
+type MonadRunEnzyme m =
+    ( MonadState EnzymeState m -- state of the strand(s) and copy mode
+    , MonadWriter [Strand] m -- strands cut off along the way
+    , MonadError () m -- allow aborting
+    )
+
+copy :: Lens' EnzymeState Bool
 copy = _1
 
-strand :: Lens' StrandState (Z.Zipper DoubledBase)
+strand :: Lens' EnzymeState (Z.Zipper DoubledBase)
 strand = _2
 
-type MonadStrand m = (MonadState StrandState m, MonadError () m)
+execAA :: MonadRunEnzyme m => AminoAcid -> m ()
+execAA aa = do
+    case aa of
+        Copy b -> copy .= b
+        Ins b -> strand %= Z.insertR (doubleBase b)
+        Move L -> strand %?= Z.moveLeft
+        Move R -> strand %?= Z.moveRight
+        Switch -> strand %= rotateStrandState
+        Cut -> do
+            rem <- strand %%= Z.cutR
+            case rem of
+              Nothing -> return ()
+              Just z -> tell $ collectStrands z
+        Del -> do
+            c <- use copy
+            p <- use $ strand . Z.focus . pos
+            if c || p == This
+                then strand %?= Z.deleteR
+                else do
+                    strand . Z.focus . pos .= Other
+                    execAA $ Move R
+        Search d s -> do
+            execAA $ Move d
+            s' <- use $ strand . Z.focus . base . to structure
+            when (s /= s') $ execAA $ Search d s
+    ensureFocus
+    ensureCopied
 
--- initStrandState :: Strand -> StrandState
--- initStrandState = StSt [] . fmap (, True)
-
--- moveStSt :: Direction -> StrandState -> Maybe StrandState
--- moveStSt L
-
-either1ToMaybe :: Either () a -> Maybe a
-either1ToMaybe = either (const Nothing) Just
-
-maybeToEither1 :: Maybe a -> Either () a
-maybeToEither1 = maybe (Left ()) Right
-
-liftMaybe :: MonadError () m => Maybe a -> m a
-liftMaybe = liftEither . maybeToEither1
-
-execAA :: MonadStrand m => AminoAcid -> m ()
-execAA = \case
-    Switch -> strand %= (Z.reverse . fmap flipDoubledBase)
-    Move d -> do
-        s <- use strand
-        s' <- liftMaybe $
-            case d of
-                L -> Z.moveLeft s
-                R -> Z.moveRight s
-        strand .= s'
-        c <- use copy
-        when c $ strand . Z.focus . posDB .= BPBoth
-    Copy b -> copy .= b
-    Ins b -> do
-        c <- use copy
-        strand %= Z.insertR (DoubledBase b (if c then BPBoth else BPBot))
-    Search d t -> do
-        execAA $ Move d
-        b <- use $ strand . Z.focus . baseDB
-        when (baseType b /= t) $ execAA $ Search d t
-
-runEnzyme :: Enzyme -> Strand -> Int -> Strand
-runEnzyme enzyme strd i = fst $ (\m -> evalRWS m () initState) $ do
-        runExceptT enzymeAction
-        toListOf (Z.elements . baseDB) <$> use strand
     where
-        initZipper = Z.mkZipper i $ fmap (flip DoubledBase BPBot) strd
-        initState :: StrandState
-        initState = (False, initZipper)
-        enzymeAction :: ExceptT () (RWS () () StrandState) ()
+        -- if there is no base under the cursor, abort
+        ensureFocus = do
+            p <- use $ strand . Z.focus . pos
+            when (p == Other) $ throwError ()
+        -- in copy mode, everywhere the cursor goes must be copied
+        ensureCopied = do
+            c <- use copy
+            when c $ strand . Z.focus . pos .= Both
+
+
+runEnzyme :: Enzyme -> Strand -> Int -> [Strand]
+runEnzyme enzyme strd i = runwRWS initState $ do
+        runExceptT enzymeAction
+        s <- use strand
+        tell $ collectStrands s
+    where
+        runwRWS :: s -> RWS () w s () -> w
+        runwRWS s m = snd $ evalRWS m () s
+
+        initState :: EnzymeState
+        initState = initEnzymeState strd i
+
+        enzymeAction :: ExceptT () (RWS () [Strand] EnzymeState) ()
         enzymeAction = forM_ enzyme execAA

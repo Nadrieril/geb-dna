@@ -4,7 +4,7 @@ let
   compiler = "ghc863";
   ghc = pkgs.haskell.packages.${compiler}.ghcWithPackages (ps: with ps; [
     lens mtl
-    tasty tasty-hunit
+    tasty tasty-hunit tasty-smallcheck
   ]);
 in
 pkgs.stdenv.mkDerivation {
