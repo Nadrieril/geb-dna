@@ -1,13 +1,14 @@
 { nixpkgs ? import <nixpkgs> {} }:
 let
   inherit (nixpkgs) pkgs;
-  compiler = "ghc844";
+  compiler = "ghc863";
   ghc = pkgs.haskell.packages.${compiler}.ghcWithPackages (ps: with ps; [
     lens mtl
+    tasty tasty-hunit
   ]);
 in
 pkgs.stdenv.mkDerivation {
   name = "geb-dna";
-  buildInputs = [ ghc ];
+  buildInputs = [ ghc pkgs.haskellPackages.ghcid ];
   shellHook = "eval $(egrep ^export ${ghc}/bin/ghc)";
 }

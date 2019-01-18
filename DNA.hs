@@ -1,5 +1,7 @@
 {-# LANGUAGE LambdaCase, OverloadedStrings, TypeSynonymInstances, FlexibleInstances,
-   FlexibleContexts, ConstraintKinds #-}
+    FlexibleContexts, ConstraintKinds #-}
+module DNA where
+
 import Data.String (IsString(..))
 import Control.Arrow (first, second)
 import Control.Lens
@@ -10,7 +12,7 @@ import Control.Monad.RWS
 import qualified Zipper as Z
 
 data Base = A | C | G | T
-    deriving (Show, Read)
+    deriving (Show, Read, Eq)
 
 data BaseType = Py | Pu
     deriving (Show, Eq)
@@ -31,14 +33,14 @@ baseComplement = \case
 
 
 data Direction = L | R
-    deriving (Show)
+    deriving (Show, Eq)
 
 data AminoAcid =
       Cut | Del | Switch
     | Move Direction | Copy Bool
     | Ins Base
     | Search Direction BaseType
-    deriving (Show)
+    deriving (Show, Eq)
 
 dupletToAA :: (Base, Base) -> Maybe AminoAcid
 dupletToAA = \case
@@ -190,7 +192,3 @@ runEnzyme enzyme strd i = fst $ (\m -> evalRWS m () initState) $ do
         initState = (False, initZipper)
         enzymeAction :: ExceptT () (RWS () () StrandState) ()
         enzymeAction = forM_ enzyme execAA
-
-strand1, strand2 :: Strand
-strand1 = "TAGATCCAGTCCACATCGA"
-strand2 = "CGGATACTAAACCGA"
